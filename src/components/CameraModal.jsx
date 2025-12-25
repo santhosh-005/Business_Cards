@@ -76,7 +76,7 @@ export default function CameraModal({ isOpen, onClose, onCapture, title = "Captu
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/95 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4">
       <div className="relative w-full max-w-2xl mx-auto">
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">

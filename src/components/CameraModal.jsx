@@ -76,7 +76,7 @@ export default function CameraModal({ isOpen, onClose, onCapture, title = "Captu
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-95 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/95 p-4">
       <div className="relative w-full max-w-2xl mx-auto">
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
@@ -132,7 +132,7 @@ export default function CameraModal({ isOpen, onClose, onCapture, title = "Captu
         <div className="mt-6 flex items-center justify-between">
           <button
             onClick={switchCamera}
-            className="flex items-center gap-2 rounded-full bg-white bg-opacity-10 backdrop-blur-sm border border-white border-opacity-20 px-5 py-3 text-white hover:bg-opacity-20 transition-all duration-200"
+            className="flex items-center gap-2 rounded-full bg-gray-800/90 backdrop-blur-sm border border-gray-600 px-5 py-3 text-white hover:bg-gray-700/90 transition-all duration-200 shadow-lg"
             title="Switch Camera"
             disabled={!isCameraReady}
           >
@@ -157,7 +157,7 @@ export default function CameraModal({ isOpen, onClose, onCapture, title = "Captu
           
           <button
             onClick={onClose}
-            className="flex items-center gap-2 rounded-full bg-white bg-opacity-10 backdrop-blur-sm border border-white border-opacity-20 px-5 py-3 text-white hover:bg-opacity-20 transition-all duration-200"
+            className="flex items-center gap-2 rounded-full bg-red-600/90 backdrop-blur-sm border border-red-500 px-5 py-3 text-white hover:bg-red-500/90 transition-all duration-200 shadow-lg"
           >
             <span className="text-sm font-semibold">Cancel</span>
           </button>

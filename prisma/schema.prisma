@@ -1,0 +1,25 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model BusinessCard {
+  id            String   @id @default(uuid())
+  fullName      String?
+  company       String?
+  jobTitle      String?
+  email         String?
+  phone         String?
+  website       String?
+  address       String?
+  frontImageUrl String?
+  backImageUrl  String?
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("business_cards")
+}

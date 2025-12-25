@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 import CameraModal from './CameraModal'
+import CropModal from './CropModal'
+import Tesseract from 'tesseract.js'
 
 export default function AddCard({ onCardAdded, onCancel }) {
   const [loading, setLoading] = useState(false)
@@ -16,10 +18,242 @@ export default function AddCard({ onCardAdded, onCancel }) {
   })
   const [mode, setMode] = useState('image') // 'image' or 'manual'
   const [frontImage, setFrontImage] = useState(null)
+  const [frontOriginalImage, setFrontOriginalImage] = useState(null) // Store original for upload
   const [backImage, setBackImage] = useState(null)
+  const [backOriginalImage, setBackOriginalImage] = useState(null) // Store original for upload
   const [frontPreview, setFrontPreview] = useState(null)
   const [backPreview, setBackPreview] = useState(null)
   const [cameraOpen, setCameraOpen] = useState(null)
+  const [ocrProcessing, setOcrProcessing] = useState(false)
+  const [ocrProgress, setOcrProgress] = useState(0)
+  const [ocrError, setOcrError] = useState(null)
+  const [extractedData, setExtractedData] = useState(null)
+  const [backOcrProcessing, setBackOcrProcessing] = useState(false)
+  const [backOcrProgress, setBackOcrProgress] = useState(0)
+  const [cropModalOpen, setCropModalOpen] = useState(null) // 'front' or 'back' or null
+  const [pendingImageFile, setPendingImageFile] = useState(null) // Image waiting to be cropped
+
+  // Extract business card info from OCR text
+  const extractBusinessCardInfo = (text) => {
+    console.log("text extracted:", text)
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0)
+    
+    const info = {
+      fullName: '',
+      company: '',
+      jobTitle: '',
+      email: '',
+      phone: '',
+      website: '',
+      address: ''
+    }
+
+    // Email regex
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g
+    // Phone regex (various formats)
+    const phoneRegex = /(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}/g
+    // Website regex
+    const websiteRegex = /(?:www\.)?[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:\/[^\s]*)?/gi
+    
+    // Common job titles to identify
+    const jobTitles = ['ceo', 'cto', 'cfo', 'coo', 'director', 'manager', 'engineer', 'developer', 'designer', 'consultant', 'analyst', 'executive', 'president', 'vice president', 'vp', 'head', 'lead', 'senior', 'junior', 'associate', 'specialist', 'coordinator', 'administrator', 'officer', 'founder', 'co-founder', 'owner', 'partner']
+    
+    // Extract email
+    const emailMatch = text.match(emailRegex)
+    if (emailMatch) {
+      info.email = emailMatch[0]
+    }
+
+    // Extract phone
+    const phoneMatch = text.match(phoneRegex)
+    if (phoneMatch) {
+      // Filter out short numbers that might be zip codes
+      const validPhones = phoneMatch.filter(p => p.replace(/\D/g, '').length >= 7)
+      if (validPhones.length > 0) {
+        info.phone = validPhones[0]
+      }
+    }
+
+    // Extract website
+    const websiteMatch = text.match(websiteRegex)
+    if (websiteMatch) {
+      // Filter out email domains
+      const validWebsites = websiteMatch.filter(w => !w.includes('@'))
+      if (validWebsites.length > 0) {
+        info.website = validWebsites[0]
+      }
+    }
+
+    // Process lines for name, company, job title, address
+    let potentialNames = []
+    let potentialCompanies = []
+    let addressParts = []
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      const lowerLine = line.toLowerCase()
+      
+      // Skip lines that are just email, phone, or website
+      if (emailRegex.test(line) && line.match(emailRegex)?.[0] === line) continue
+      if (line.match(/^[\d\s\-\+\(\)\.]+$/) && line.replace(/\D/g, '').length >= 7) continue
+      
+      // Check if line contains job title
+      const hasJobTitle = jobTitles.some(title => lowerLine.includes(title))
+      if (hasJobTitle && !info.jobTitle) {
+        info.jobTitle = line
+        continue
+      }
+
+      // Check for address indicators
+      const addressKeywords = ['street', 'st.', 'avenue', 'ave', 'road', 'rd', 'boulevard', 'blvd', 'suite', 'floor', 'building', 'city', 'state', 'zip', 'country']
+      const hasAddressKeyword = addressKeywords.some(keyword => lowerLine.includes(keyword))
+      const hasZipCode = /\b\d{5,6}\b/.test(line)
+      
+      if (hasAddressKeyword || hasZipCode) {
+        addressParts.push(line)
+        continue
+      }
+
+      // First substantial line is usually name
+      if (i < 3 && line.length > 2 && line.length < 50 && /^[A-Za-z\s\.\-']+$/.test(line)) {
+        potentialNames.push(line)
+      }
+      
+      // Lines with Inc, Ltd, LLC, Corp are usually company names
+      if (/\b(inc|ltd|llc|corp|corporation|company|co\.|group|technologies|solutions|services|enterprises)\b/i.test(line)) {
+        potentialCompanies.push(line)
+      }
+    }
+
+    // Assign name (usually first text line that looks like a name)
+    if (potentialNames.length > 0) {
+      info.fullName = potentialNames[0]
+    }
+
+    // Assign company
+    if (potentialCompanies.length > 0) {
+      info.company = potentialCompanies[0]
+    }
+
+    // Assign address
+    if (addressParts.length > 0) {
+      info.address = addressParts.join(', ')
+    }
+
+    return info
+  }
+
+  // Process image with OCR
+  const processImageWithOCR = async (imageFile) => {
+    setOcrProcessing(true)
+    setOcrProgress(0)
+    setOcrError(null)
+    console.log("imageFile:", imageFile)
+
+    try {
+      const result = await Tesseract.recognize(
+        imageFile,
+        'eng',
+        {
+          logger: (m) => {
+            if (m.status === 'recognizing text') {
+              setOcrProgress(Math.round(m.progress * 100))
+            }
+          }
+        }
+      )
+
+      const extractedText = result.data.text
+      
+      if (!extractedText || extractedText.trim().length === 0) {
+        setOcrError('No text detected in the image. Please take a clearer photo of the business card.')
+        return null
+      }
+
+      const extractedInfo = extractBusinessCardInfo(extractedText)
+      
+      // Check if any useful info was extracted
+      const hasAnyData = extractedInfo.fullName || extractedInfo.company || 
+                         extractedInfo.email || extractedInfo.phone || 
+                         extractedInfo.website || extractedInfo.jobTitle
+      
+      if (!hasAnyData) {
+        setOcrError('Could not extract any contact information. Please try again with a clearer image.')
+        return null
+      }
+      
+      setExtractedData({ ...extractedInfo, rawText: extractedText })
+      
+      // Auto-fill form with extracted data
+      setFormData(prev => ({
+        ...prev,
+        fullName: extractedInfo.fullName || prev.fullName,
+        company: extractedInfo.company || prev.company,
+        jobTitle: extractedInfo.jobTitle || prev.jobTitle,
+        email: extractedInfo.email || prev.email,
+        phone: extractedInfo.phone || prev.phone,
+        website: extractedInfo.website || prev.website,
+        address: extractedInfo.address || prev.address
+      }))
+
+      return extractedInfo
+    } catch (error) {
+      console.error('OCR Error:', error)
+      setOcrError('Failed to process image. Please try again.')
+      return null
+    } finally {
+      setOcrProcessing(false)
+    }
+  }
+
+  // Process back image with OCR - only fills empty fields
+  const processBackImageWithOCR = async (imageFile) => {
+    setBackOcrProcessing(true)
+    setBackOcrProgress(0)
+
+    try {
+      const result = await Tesseract.recognize(
+        imageFile,
+        'eng',
+        {
+          logger: (m) => {
+            if (m.status === 'recognizing text') {
+              setBackOcrProgress(Math.round(m.progress * 100))
+            }
+          }
+        }
+      )
+
+      const extractedText = result.data.text
+      
+      if (!extractedText || extractedText.trim().length === 0) {
+        // Silent fail for back image - it's optional
+        return null
+      }
+
+      const extractedInfo = extractBusinessCardInfo(extractedText)
+      
+      // Only fill in empty fields (don't overwrite existing data)
+      setFormData(prev => ({
+        ...prev,
+        fullName: prev.fullName || extractedInfo.fullName,
+        company: prev.company || extractedInfo.company,
+        jobTitle: prev.jobTitle || extractedInfo.jobTitle,
+        email: prev.email || extractedInfo.email,
+        phone: prev.phone || extractedInfo.phone,
+        website: prev.website || extractedInfo.website,
+        address: prev.address || extractedInfo.address
+      }))
+
+      return extractedInfo
+    } catch (error) {
+      console.error('OCR Error (back):', error)
+      // Silent fail for back image
+      return null
+    } finally {
+      setBackOcrProcessing(false)
+    }
+  }
 
   const handleImageUpload = async (file, type) => {
     if (!file) return null
@@ -49,8 +283,9 @@ export default function AddCard({ onCardAdded, onCancel }) {
     setLoading(true)
 
     try {
-      const frontImageUrl = frontImage ? await handleImageUpload(frontImage, 'front') : null
-      const backImageUrl = backImage ? await handleImageUpload(backImage, 'back') : null
+      // Upload original images (not cropped) to Supabase
+      const frontImageUrl = frontOriginalImage ? await handleImageUpload(frontOriginalImage, 'front') : null
+      const backImageUrl = backOriginalImage ? await handleImageUpload(backOriginalImage, 'back') : null
 
       const { data, error } = await supabase
         .from('business_cards')
@@ -83,39 +318,77 @@ export default function AddCard({ onCardAdded, onCancel }) {
     setFormData({ ...formData, [e.target.name]: e.target.value })
   }
 
+  // Open crop modal when file is selected
   const handleFileSelect = (e, type) => {
     const file = e.target.files[0]
     if (file) {
-      const preview = URL.createObjectURL(file)
-      if (type === 'front') {
-        setFrontImage(file)
-        setFrontPreview(preview)
-      } else {
-        setBackImage(file)
-        setBackPreview(preview)
-      }
+      setPendingImageFile(file)
+      setCropModalOpen(type)
     }
   }
 
+  // Open crop modal when camera captures image
   const handleCameraCapture = (file, type) => {
-    const preview = URL.createObjectURL(file)
+    setPendingImageFile(file)
+    setCropModalOpen(type)
+  }
+
+  // Handle crop completion
+  const handleCropComplete = async ({ croppedFile, originalFile }) => {
+    const type = cropModalOpen
+    setCropModalOpen(null)
+    setPendingImageFile(null)
+    
+    const preview = URL.createObjectURL(croppedFile)
+    
     if (type === 'front') {
-      setFrontImage(file)
+      setFrontImage(croppedFile)
+      setFrontOriginalImage(originalFile) // Store original for upload
       setFrontPreview(preview)
+      // Process cropped image with OCR
+      await processImageWithOCR(croppedFile)
     } else {
-      setBackImage(file)
+      setBackImage(croppedFile)
+      setBackOriginalImage(originalFile) // Store original for upload
       setBackPreview(preview)
+      // Process back image with OCR - only fills empty fields
+      await processBackImageWithOCR(croppedFile)
     }
+  }
+
+  const handleCropCancel = () => {
+    setCropModalOpen(null)
+    setPendingImageFile(null)
   }
 
   const removeImage = (type) => {
     if (type === 'front') {
       setFrontImage(null)
+      setFrontOriginalImage(null)
       setFrontPreview(null)
+      setExtractedData(null)
+      setOcrError(null)
+      // Reset form data when removing front image
+      setFormData({
+        fullName: '',
+        company: '',
+        jobTitle: '',
+        email: '',
+        phone: '',
+        website: '',
+        address: '',
+        notes: formData.notes
+      })
     } else {
       setBackImage(null)
+      setBackOriginalImage(null)
       setBackPreview(null)
     }
+  }
+
+  const retakeImage = (type) => {
+    removeImage(type)
+    setCameraOpen(type)
   }
 
   return (
@@ -162,15 +435,41 @@ export default function AddCard({ onCardAdded, onCancel }) {
                   {frontPreview ? (
                     <div className="relative">
                       <img src={frontPreview} alt="Front preview" className="w-full rounded-lg border-2 border-gray-200" />
-                      <button
-                        type="button"
-                        onClick={() => removeImage('front')}
-                        className="absolute right-2 top-2 rounded-full bg-red-500 p-2 text-white shadow-lg hover:bg-red-600"
-                      >
-                        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
+                      
+                      {/* OCR Processing Overlay */}
+                      {ocrProcessing && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/60 rounded-lg">
+                          <div className="text-center text-white">
+                            <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-4 border-white border-t-transparent"></div>
+                            <p className="font-medium">Processing image...</p>
+                            <p className="text-sm opacity-80">{ocrProgress}% complete</p>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* Action Buttons */}
+                      <div className="absolute right-2 top-2 flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => retakeImage('front')}
+                          className="rounded-full bg-blue-500 p-2 text-white shadow-lg hover:bg-blue-600"
+                          title="Retake"
+                        >
+                          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeImage('front')}
+                          className="rounded-full bg-red-500 p-2 text-white shadow-lg hover:bg-red-600"
+                          title="Remove"
+                        >
+                          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -215,6 +514,18 @@ export default function AddCard({ onCardAdded, onCancel }) {
                   {backPreview ? (
                     <div className="relative">
                       <img src={backPreview} alt="Back preview" className="w-full rounded-lg border-2 border-gray-200" />
+                      
+                      {/* Back Image OCR Processing Overlay */}
+                      {backOcrProcessing && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/60 rounded-lg">
+                          <div className="text-center text-white">
+                            <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-4 border-white border-t-transparent"></div>
+                            <p className="font-medium">Processing back...</p>
+                            <p className="text-sm opacity-80">{backOcrProgress}% complete</p>
+                          </div>
+                        </div>
+                      )}
+                      
                       <button
                         type="button"
                         onClick={() => removeImage('back')}
@@ -262,6 +573,124 @@ export default function AddCard({ onCardAdded, onCancel }) {
                     </div>
                   </div>
                 </div>
+
+                {/* OCR Error Message */}
+                {ocrError && (
+                  <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4">
+                    <div className="flex items-start gap-3">
+                      <svg className="h-5 w-5 text-red-500 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <div className="flex-1">
+                        <p className="font-medium text-red-800">Text extraction failed</p>
+                        <p className="text-sm text-red-600 mt-1">{ocrError}</p>
+                        <button
+                          type="button"
+                          onClick={() => retakeImage('front')}
+                          className="mt-3 inline-flex items-center gap-2 rounded-lg bg-red-100 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-200 transition-colors"
+                        >
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                          Retake Photo
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Extracted Data Display */}
+                {extractedData && !ocrError && !ocrProcessing && (
+                  <div className="mt-6 rounded-lg border border-green-200 bg-green-50 p-4">
+                    <div className="flex items-center gap-2 mb-4">
+                      <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <h3 className="font-semibold text-green-800">Extracted Information</h3>
+                    </div>
+                    <p className="text-sm text-green-700 mb-4">Review and edit the extracted information below:</p>
+                    
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Full Name</label>
+                        <input
+                          type="text"
+                          name="fullName"
+                          value={formData.fullName}
+                          onChange={handleChange}
+                          placeholder="Not detected"
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Company</label>
+                        <input
+                          type="text"
+                          name="company"
+                          value={formData.company}
+                          onChange={handleChange}
+                          placeholder="Not detected"
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Job Title</label>
+                        <input
+                          type="text"
+                          name="jobTitle"
+                          value={formData.jobTitle}
+                          onChange={handleChange}
+                          placeholder="Not detected"
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Email</label>
+                        <input
+                          type="email"
+                          name="email"
+                          value={formData.email}
+                          onChange={handleChange}
+                          placeholder="Not detected"
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Phone</label>
+                        <input
+                          type="tel"
+                          name="phone"
+                          value={formData.phone}
+                          onChange={handleChange}
+                          placeholder="Not detected"
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Website</label>
+                        <input
+                          type="text"
+                          name="website"
+                          value={formData.website}
+                          onChange={handleChange}
+                          placeholder="Not detected"
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Address</label>
+                        <input
+                          type="text"
+                          name="address"
+                          value={formData.address}
+                          onChange={handleChange}
+                          placeholder="Not detected"
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -401,6 +830,13 @@ export default function AddCard({ onCardAdded, onCancel }) {
         onClose={() => setCameraOpen(null)}
         onCapture={(file) => handleCameraCapture(file, cameraOpen)}
         title={`Capture ${cameraOpen === 'front' ? 'Front' : 'Back'} Image`}
+      />
+
+      <CropModal
+        isOpen={cropModalOpen !== null}
+        onClose={handleCropCancel}
+        imageFile={pendingImageFile}
+        onCropComplete={handleCropComplete}
       />
     </div>
   )

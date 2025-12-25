@@ -121,13 +121,6 @@ export default function AddCard({ onCardAdded, onCancel }) {
   return (
     <>
       <div className="mx-auto max-w-5xl">
-        <div className="mb-6 rounded-xl bg-gradient-to-r from-blue-600 to-blue-700 p-6 text-white shadow-lg">
-          <div>
-            <h2 className="text-2xl font-bold">Add New Business Card</h2>
-            <p className="mt-1 text-blue-100">Upload card images or enter details manually</p>
-          </div>
-        </div>
-
         <div className="mb-6 flex rounded-lg bg-gray-100 p-1">
           <button
             type="button"
